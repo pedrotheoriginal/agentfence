@@ -1,0 +1,176 @@
+# =============================================================================
+# AgentFence configuration  -  "Let AI act. Keep control."
+# =============================================================================
+# How decisions are made (deterministic, no AI involved):
+#   1. The command is split into segments (&&, ||, ;, |, &, newlines, $( ), `` ).
+#   2. Each segment is matched against every rule (regex, case-insensitive).
+#   3. Block/confirm rules are also matched against the FULL command string
+#      (this catches things like `curl ... | sh`).
+#   4. The MOST RESTRICTIVE match wins:  block  >  confirm  >  allow.
+#   5. Segments that match no rule fall back to `default_action`.
+#
+# Tip: 'single-quoted' YAML strings keep regex backslashes untouched.
+# =============================================================================
+
+version: 1
+
+# What to do with a command segment that matches no rule: allow | confirm | block
+# `confirm` is the safe default (allowlist-style firewall).
+default_action: confirm
+
+# Maximum execution time in seconds for approved commands (null = no limit).
+timeout: null
+
+audit:
+  enabled: true
+  db_path: ~/.agentfence/audit.db
+
+rules:
+  # ---------------------------------------------------------------------------
+  # BLOCK - never executed, no prompt, always logged
+  # ---------------------------------------------------------------------------
+  - name: rm-root-or-home
+    action: block
+    description: Recursive delete of the filesystem root or the home directory.
+    pattern: '\brm\s+.*(-\w*r\w*|--recursive)\b.*\s[\x22\x27]?(/\*?|~/?\*?|\$HOME/?\*?)[\x22\x27]?([\s)]|$)'
+
+  - name: fork-bomb
+    action: block
+    description: Classic shell fork bomb.
+    pattern: ':\s*\(\s*\)\s*\{'
+
+  - name: format-filesystem
+    action: block
+    description: Creating a filesystem destroys the data on the target device.
+    pattern: '\bmkfs(\.\w+)?\b'
+
+  - name: dd-to-device
+    action: block
+    description: Raw write to a block device.
+    pattern: '\bdd\b.*\bof=/dev/(sd|nvme|hd|vd|disk|mmcblk)'
+
+  - name: redirect-to-device
+    action: block
+    description: Redirecting output into a block device.
+    pattern: '>\s*/dev/(sd|nvme|hd|vd|disk|mmcblk)\w*'
+
+  - name: chmod-root
+    action: block
+    description: Recursive permission change on the filesystem root.
+    pattern: '\bchmod\s+(-[a-zA-Z]+\s+)*[0-7]{3,4}\s+/(\s|$)'
+
+  - name: pipe-to-shell
+    action: block
+    description: Downloading and piping straight into a shell.
+    pattern: '\b(curl|wget)\b[^|]*\|\s*(sudo\s+)?(ba|z|da|k)?sh\b'
+
+  - name: power-control
+    action: block
+    description: Shutting down or rebooting the machine.
+    pattern: '\b(shutdown|reboot|halt|poweroff)\b'
+
+  - name: drop-database
+    action: block
+    description: Dropping an entire database or schema.
+    pattern: '\bdrop\s+(database|schema)\b'
+
+  - name: read-private-keys
+    action: block
+    description: Access to SSH private keys or cloud credential files.
+    pattern: '(\.ssh/id_[a-z0-9]+\b(?!\.pub)|\.aws/credentials|\.kube/config|\.gnupg/)'
+
+  # ---------------------------------------------------------------------------
+  # CONFIRM - requires interactive human approval (default answer: No)
+  # ---------------------------------------------------------------------------
+  - name: delete-files
+    action: confirm
+    description: Deleting files or directories.
+    pattern: '\b(rm|rmdir|unlink|shred)\b'
+
+  - name: privilege-escalation
+    action: confirm
+    description: Running a command with elevated privileges.
+    pattern: '\b(sudo|su|doas)\b'
+
+  - name: git-remote-write
+    action: confirm
+    description: Publishing commits to a remote repository.
+    pattern: '\bgit\s+push\b'
+
+  - name: git-destructive
+    action: confirm
+    description: Git operations that can discard work or rewrite history.
+    pattern: '\bgit\s+(reset\s+--hard|clean\s+-\w*[fd]|checkout\s+--|restore\s|rebase|branch\s+-D)'
+
+  - name: package-install
+    action: confirm
+    description: Installing packages changes the environment and supply chain.
+    pattern: '\b(pip3?|pipx|npm|yarn|pnpm|apt(-get)?|brew|cargo|gem|go)\s+(install|add|i|get|remove|uninstall)\b'
+
+  - name: docker-mutating
+    action: confirm
+    description: Docker commands that run or destroy containers, images or volumes.
+    pattern: '\bdocker(-compose)?\s+(run|rm|rmi|kill|system\s+prune|volume\s+(rm|prune)|compose\s+down)\b'
+
+  - name: infra-mutating
+    action: confirm
+    description: Infrastructure changes (Kubernetes / Terraform).
+    pattern: '\b(kubectl\s+(delete|apply|patch|replace|scale)|terraform\s+(apply|destroy)|helm\s+(install|upgrade|uninstall))\b'
+
+  - name: permissions-change
+    action: confirm
+    description: Changing file permissions or ownership.
+    pattern: '\b(chmod|chown|chgrp)\b'
+
+  - name: network-access
+    action: confirm
+    description: Outbound network access or remote shells.
+    pattern: '(?<![\w.-])(curl|wget|nc|ncat|telnet|ssh|scp|sftp|rsync|ftp)(?![\w.-])'
+
+  - name: process-kill
+    action: confirm
+    description: Terminating processes.
+    pattern: '\b(kill|killall|pkill)\b'
+
+  - name: move-files
+    action: confirm
+    description: Moving files can overwrite existing data.
+    pattern: '\bmv\b'
+
+  - name: sql-destructive
+    action: confirm
+    description: Destructive SQL statements.
+    pattern: '\b(delete\s+from|truncate\s+table|drop\s+table)\b'
+
+  - name: dotenv-access
+    action: confirm
+    description: Touching .env files that usually contain secrets.
+    pattern: '(^|[\s/])\.env(\.\w+)?\b'
+
+  - name: find-destructive
+    action: confirm
+    description: find with -delete or -exec can modify many files at once.
+    pattern: '\bfind\b.*\s-(delete|exec|execdir)\b'
+
+  - name: file-write
+    action: confirm
+    description: Writing to files via redirection, tee or in-place sed.
+    pattern: '(?<![0-9&])>>?\s*(?!&|/dev/null)\S|\btee\b|\bsed\s+(-\w+\s+)*-i'
+
+  # ---------------------------------------------------------------------------
+  # ALLOW - safe, read-only or build/test commands (anchored at segment start)
+  # ---------------------------------------------------------------------------
+  - name: read-only-basics
+    action: allow
+    description: Common read-only inspection commands.
+    pattern: '^\s*(ls|ll|pwd|whoami|date|echo|cat|head|tail|wc|grep|rg|find|tree|which|file|stat|du|df|uname|hostname|true|false)(\s|$)'
+
+  - name: git-read-only
+    action: allow
+    description: Git commands that only read repository state.
+    pattern: '^\s*git\s+(status|log|diff|show|blame|rev-parse|remote\s+-v)(\s|$)'
+
+  - name: test-and-lint
+    action: allow
+    description: Test runners, linters and build tools.
+    pattern: '^\s*(pytest|python3?\s+-m\s+pytest|ruff\s+check|mypy|npm\s+(test|run\s+(test|lint|build))|cargo\s+(test|build|check)|go\s+(test|build|vet))(\s|$)'
